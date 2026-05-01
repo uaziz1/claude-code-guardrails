@@ -81,6 +81,8 @@ run_bash "allow ls"                    0 '{"tool_name":"Bash","tool_input":{"com
 run_bash "allow git status"            0 '{"tool_name":"Bash","tool_input":{"command":"git status"}}'
 run_bash "block chained rm -rf"        2 '{"tool_name":"Bash","tool_input":{"command":"echo hi && rm -rf /tmp/x"}}'
 run_bash "block chained force-push"    2 '{"tool_name":"Bash","tool_input":{"command":"git status; git push --force-with-lease origin main"}}'
+run_bash "block git push +refspec"     2 '{"tool_name":"Bash","tool_input":{"command":"git push origin +main:main"}}'
+run_bash "block git push +ref short"   2 '{"tool_name":"Bash","tool_input":{"command":"git push origin +main"}}'
 run_bash "block wrapper-stripped rm"   2 '{"tool_name":"Bash","tool_input":{"command":"timeout 30 rm -rf /tmp/x"}}'
 run_bash "block env-runner inner rm"   2 '{"tool_name":"Bash","tool_input":{"command":"docker exec foo rm -rf /data"}}'
 run_bash "block python -c"             2 '{"tool_name":"Bash","tool_input":{"command":"python3 -c \"import os\""}}'
@@ -145,6 +147,10 @@ run_editwrite_block "block GCP svc acct"   "$(python3 -c 'import json,sys; print
 run_editwrite_allow "allow source edit"    '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/foo.ts","new_string":"const x = 1"}}'
 run_editwrite_allow "allow benign write"   '{"tool_name":"Write","tool_input":{"file_path":"/tmp/notes.md","content":"hello world"}}'
 run_editwrite_allow "allow .env.example"   '{"tool_name":"Edit","tool_input":{"file_path":"/repo/.env.example","new_string":"FOO=bar"}}'
+run_editwrite_allow "allow memory dir"     '{"tool_name":"Write","tool_input":{"file_path":"/Users/x/.claude/projects/foo/memory/note.md","content":"hi"}}'
+run_editwrite_allow "allow session-logs"   '{"tool_name":"Write","tool_input":{"file_path":"/Users/x/.claude/session-logs/2026-05-01.jsonl","content":"{}"}}'
+run_editwrite_block "block .claude/settings" '{"tool_name":"Edit","tool_input":{"file_path":"/Users/x/.claude/settings.json","new_string":"x"}}'
+run_editwrite_block "block .claude/agents"   '{"tool_name":"Write","tool_input":{"file_path":"/Users/x/.claude/agents/evil.md","content":"x"}}'
 
 # Symlink resolution: an Edit on a symlink whose target is sensitive must be
 # denied even when the requested path itself looks innocuous.

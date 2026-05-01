@@ -51,6 +51,11 @@ PATTERNS = [
         "git push --force"),
     (r"\bgit\s+push\s+[^|;&]*?--force-with-lease\b",
         "git push --force-with-lease"),
+    # `git push origin +main` is force-push in disguise — `+refspec` syntax
+    # is documented git for "allow non-fast-forward". Match a `+` token that
+    # looks like a refspec arg (preceded by whitespace, not a flag).
+    (r"\bgit\s+push\s+[^|;&]*?\s\+[A-Za-z0-9._/-]+(?::[A-Za-z0-9._/-]+)?(\s|$)",
+        "git push +refspec (force in disguise)"),
     (r"\bgit\s+reset\s+[^|;&]*?--hard\b",
         "git reset --hard"),
     (r"\bgit\s+clean\s+[^|;&]*?-[A-Za-z]*f",
