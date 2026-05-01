@@ -83,7 +83,7 @@ Each hook keeps its policy as a list literal at the top of the file — `PATTERN
 Requires Python 3.9+ (no third-party deps) and Claude Code ≥ 2.0.65 (see [CVE list](#cves)).
 
 ```bash
-git clone <repo-url> claude-code-guardrails
+git clone https://github.com/uaziz1/claude-code-guardrails.git
 cd claude-code-guardrails
 ./install.sh        # copies hooks into ~/.claude/hooks/
                     # offers to install templates/settings.json if absent
@@ -125,6 +125,19 @@ The hook is text-pattern-based, so anything that hides the dangerous text from t
 - **Exotic redirection**: `IFS=` games and `$'\x...'` byte construction.
 
 Anthropic's OS-level [sandbox](https://code.claude.com/docs/en/settings) closes these properly. This bundle is the next-best defence where the sandbox isn't an option, and a defence-in-depth layer where it is.
+
+## False positives
+
+The hooks substring-match the raw command, so any literal that *names* a blocked pattern fires the rule even when the surrounding context is benign — including HEREDOC bodies. The most common bite is **git commit messages that describe what the change does**: a commit like `git commit -m "$(cat <<EOF … EOF)"` whose body mentions a blocked literal (`rm -rf`, `python -m`, `git restore`, ...) gets the whole HEREDOC scanned along with the rest of the argv, and the hook fires.
+
+**Workaround**: write the message to a file and use `-F`.
+
+```bash
+# Use Write or your editor to create the message, then:
+git commit -F path/to/msg.txt
+```
+
+The file path is on the command line; the body isn't. The same trick applies to any command whose argv would otherwise contain a flagged literal — put the content in a file (via the Edit/Write tool, which only scans for credential shapes and sensitive paths) and reference it.
 
 ## Customize
 
