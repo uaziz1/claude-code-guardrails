@@ -66,10 +66,14 @@
       "Edit(.husky/**)",
       "Read(~/Library/Keychains/**)",
       "Read(~/Library/Cookies/**)",
+      "Edit(~/Library/LaunchAgents/**)",
+      "Edit(~/Library/LaunchDaemons/**)",
       "Edit(/etc/shadow)",
       "Edit(/etc/sudoers)",
       "Edit(/etc/sudoers.d/**)",
-      "Edit(/etc/passwd)"
+      "Edit(/etc/passwd)",
+      "Edit(~/.config/systemd/user/**)",
+      "Edit(~/.config/autostart/**)"
     ],
     "ask": [
       "Bash(rm *)",
