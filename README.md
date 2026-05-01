@@ -65,18 +65,18 @@ npm / SendGrid / Slack tokens, GCP service-account JSON, or PEM private
 keys.
 ```
 
-`./tests/run.sh` exercises every category above (68 cases).
+`./tests/run.sh` exercises every category above (88 cases).
 
 ## What it ships
 
 | Hook | Event | What it does |
 |---|---|---|
-| `bash-guard.py` | `PreToolUse:Bash` | Regex-scan the raw command for dangerous patterns wherever they appear — chains, wrappers, env-runners, subshells. Exit 2 to block. |
-| `edit-write-guard.py` | `PreToolUse:Edit\|Write` | Match the requested path **and its symlink target** against a sensitive-path list (case-insensitive). Scan content for credential shapes. JSON `permissionDecision: "deny"` to block (exit 2 is unreliable for these tools per [#13744](https://github.com/anthropics/claude-code/issues/13744)). |
+| `bash-guard.py` | `PreToolUse:Bash` | Regex-scan the raw command for dangerous patterns wherever they appear — chains, wrappers, env-runners, subshells. Exit 2 to block. Also scope-checks redirect / `tee` / `dd of=` destinations and returns `ask` for writes outside the project. |
+| `edit-write-guard.py` | `PreToolUse:Edit\|Write` | Match the requested path **and its symlink target** against a sensitive-path list (case-insensitive). Scan content for credential shapes. Apply scope check: silent allow inside `$CWD` + pre-approved roots, `ask` outside, deny on sensitive paths. JSON `permissionDecision` on stdout (exit 2 is unreliable for these tools per [#13744](https://github.com/anthropics/claude-code/issues/13744)). |
 | `audit.py` | `PostToolUse` | Append a JSON line per tool call to `~/.claude/session-logs/YYYY-MM-DD.jsonl`. Always non-blocking — every error path returns 0. |
 | `session-start.py` | `SessionStart` | Log environment + git HEAD. Refuse to start if the project's `.claude/settings.json` contains `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `enableAllProjectMcpServers: true`, `autoApprove: true`, or hook commands that shell out via `curl` / `wget` / `bash -c` / command substitution. |
 
-Each hook keeps its policy as a list literal at the top of the file — `PATTERNS`, `SENSITIVE_PATH`, `PATH_DENY`, `CONTENT_DENY`. Edit those to customize.
+Each hook keeps its policy as a list literal at the top of the file — `PATTERNS`, `SENSITIVE_PATH`, `WRITE_ALLOW_ROOTS`, `PATH_DENY`, `CONTENT_DENY`. Edit those to customize.
 
 ## Quick start
 
@@ -85,9 +85,10 @@ Requires Python 3.9+ (no third-party deps) and Claude Code ≥ 2.0.65 (see [CVE 
 ```bash
 git clone https://github.com/uaziz1/claude-code-guardrails.git
 cd claude-code-guardrails
-./install.sh        # copies hooks into ~/.claude/hooks/
-                    # offers to install templates/settings.json if absent
-./tests/run.sh      # 68 cases — should print "68 passed, 0 failed"
+./install.sh        # detects OS, copies hooks into ~/.claude/hooks/,
+                    # reports which platform-specific deny patterns
+                    # are active, and offers to install settings.json
+./tests/run.sh      # 88 cases — should print "88 passed, 0 failed"
 ```
 
 If `~/.claude/settings.json` already exists, the installer asks you to merge the `permissions` and `hooks` blocks from `templates/settings.json` by hand. Back up first:
