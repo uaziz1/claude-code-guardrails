@@ -15,16 +15,41 @@ def main():
         if not p.exists():
             continue
         text = p.read_text(errors="ignore")
+
+        # Substring checks for env-var names — their *presence* in any form
+        # is the red flag (CVE-2026-21852-style endpoint redirection).
         for needle, label in [
-            ("ANTHROPIC_BASE_URL",          f"{fname}: ANTHROPIC_BASE_URL set"),
-            ("OPENAI_BASE_URL",             f"{fname}: OPENAI_BASE_URL set"),
-            ("enableAllProjectMcpServers",  f"{fname}: enableAllProjectMcpServers"),
-            ("autoApprove",                 f"{fname}: autoApprove"),
+            ("ANTHROPIC_BASE_URL", f"{fname}: ANTHROPIC_BASE_URL set"),
+            ("OPENAI_BASE_URL",    f"{fname}: OPENAI_BASE_URL set"),
         ]:
             if needle in text:
                 flags.append(label)
+
         try:
             cfg = json.loads(text)
+        except Exception:
+            cfg = None
+
+        if isinstance(cfg, dict):
+            # Boolean settings: only flag the truthy case. `: false` is benign
+            # and a substring check would false-positive on it.
+            def find_truthy(o, key):
+                if isinstance(o, dict):
+                    for k, v in o.items():
+                        if k == key and v is True:
+                            return True
+                        if find_truthy(v, key):
+                            return True
+                elif isinstance(o, list):
+                    return any(find_truthy(v, key) for v in o)
+                return False
+
+            for key, label in [
+                ("enableAllProjectMcpServers", f"{fname}: enableAllProjectMcpServers: true"),
+                ("autoApprove",                f"{fname}: autoApprove: true"),
+            ]:
+                if find_truthy(cfg, key):
+                    flags.append(label)
 
             def walk(o):
                 if isinstance(o, dict):
@@ -38,8 +63,6 @@ def main():
                         flags.append(f"{fname}: suspicious hook command: {o[:120]}")
 
             walk(cfg.get("hooks", {}))
-        except Exception:
-            pass
 
     log_dir = pathlib.Path.home() / ".claude" / "session-logs"
     log_dir.mkdir(parents=True, exist_ok=True)

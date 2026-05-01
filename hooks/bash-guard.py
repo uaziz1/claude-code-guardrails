@@ -18,6 +18,23 @@ heredoc bodies, runtime-computed names, etc.).
 import json, re, sys
 
 
+# Sensitive paths — secret-bearing tokens any read/write/move command might
+# touch. Word-boundary-anchored so .env.example etc. is exempt.
+# `@` is included so curl's `--data @file` / `--upload-file @file` forms,
+# which read a file as the request body, can't quietly exfil secrets.
+_LEAD = r"[\s/'\"=@]"
+SENSITIVE_PATH = (
+    r"(?:"
+    rf"(?:^|{_LEAD})\.env\b(?!\.example|\.sample|\.template|\.dist)"
+    rf"|(?:^|{_LEAD})\.(?:aws|ssh|kube|gnupg)/"
+    rf"|(?:^|{_LEAD})\.netrc\b"
+    rf"|(?:^|{_LEAD})\.npmrc\b"
+    rf"|(?:^|{_LEAD})\.pypirc\b"
+    r"|\bid_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?\b"
+    r")"
+)
+
+
 PATTERNS = [
     # rm with both -r/-R and -f flags in any order
     (r"\brm\s+-[A-Za-z]*[rR][A-Za-z]*[fF]\b",
@@ -42,12 +59,24 @@ PATTERNS = [
         "git checkout --"),
     (r"\bgit\s+checkout\s+\.(\s|$)",
         "git checkout ."),
+    (r"\bgit\s+restore\b",
+        "git restore"),
     (r"\bgit\s+branch\s+[^|;&]*?-D\b",
         "git branch -D"),
     (r"\bgit\s+filter-branch\b",
         "git filter-branch"),
     (r"\bgit\s+config\s+[^|;&]*?core\.hooksPath\b",
         "git config core.hooksPath"),
+    (r"\bgit\s+stash\s+(?:drop|clear)\b",
+        "git stash drop/clear"),
+    (r"\bgit\s+update-ref\s+[^|;&]*?-d\b",
+        "git update-ref -d"),
+    (r"\bgit\s+submodule\s+deinit\s+[^|;&]*?-f\b",
+        "git submodule deinit -f"),
+    (r"\bgit\s+gc\s+[^|;&]*?--prune\b",
+        "git gc --prune"),
+    (r"\bgit\s+reflog\s+(?:expire|delete)\b",
+        "git reflog expire/delete"),
 
     # System / privilege escalation
     (r"\bsudo\b",                                  "sudo"),
@@ -66,13 +95,23 @@ PATTERNS = [
     # Network exfil / shell-from-stream
     (r"\b(?:curl|wget)\s+[^|;&]*?\|\s*(?:sh|bash|zsh|dash|ksh)\b",
         "curl|wget piped to shell"),
+    # curl/wget saving to an executable-looking path → high odds of
+    # download-then-execute on the next command.
+    (r"\b(?:curl|wget)\s+[^|;&]*?(?:-o|--output|-O)\s+\S+\.(?:sh|bash|zsh|py|rb|pl|exe|bat|ps1|cmd|scr|jar)\b",
+        "curl|wget output to script/executable"),
     (r"\bnc\s+(?:[^|;&]*?\s)?-l\b",                "nc -l (listener)"),
     (r"\bnc\s+(?:[^|;&]*?\s)?-e\b",                "nc -e (command exec)"),
     (r"\bsocat\b",                                 "socat"),
 
-    # Interpreter -c / -e: arbitrary code via Bash
-    (r"\b(?:python|python3)\s+(?:[^|;&]*?\s)?-c\b",
+    # Shell -c: arbitrary inline command. The most direct bypass otherwise.
+    (r"\b(?:bash|zsh|fish|ksh|dash|sh)\s+(?:[^|;&]*?\s)?-c\b",
+        "shell -c (bash/zsh/fish/ksh/dash/sh)"),
+
+    # Interpreter -c / -e / -m: arbitrary code via Bash
+    (r"\b(?:python|python3|python2)\s+(?:[^|;&]*?\s)?-c\b",
         "python -c"),
+    (r"\b(?:python|python3|python2)\s+(?:[^|;&]*?\s)?-m\b",
+        "python -m (arbitrary module exec)"),
     (r"\b(?:node|deno)\s+(?:[^|;&]*?\s)?(?:-e|--eval)\b",
         "node/deno -e"),
     (r"\bperl\s+(?:[^|;&]*?\s)?-e\b",
@@ -87,6 +126,11 @@ PATTERNS = [
     # Command substitution in command position (rare in legit usage)
     (r"(?:^|[;&|]\s*)\$\(",                        "$( ... ) as command"),
     (r"(?:^|[;&|]\s*)`",                           "backtick substitution as command"),
+
+    # Sensitive-path access. Catches reads (cat/head/less/sed/grep/xxd/base64/
+    # tee), copies/renames (cp/mv/ln) and exfil (scp/rsync) of credentials,
+    # which would otherwise bypass the Edit/Write hook entirely.
+    (SENSITIVE_PATH, "command references sensitive path"),
 ]
 
 
