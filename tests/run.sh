@@ -36,6 +36,20 @@ run_bash() {
     fi
 }
 
+# Bash scope-check tier: JSON `ask` on stdout, exit 0.
+run_bash_ask() {
+    local name="$1" payload="$2"
+    local out
+    out=$(echo "$payload" | "$HOOKS/bash-guard.py" 2>/dev/null)
+    if echo "$out" | grep -q '"permissionDecision": "ask"'; then
+        echo "  ok    $name"
+        pass=$((pass+1))
+    else
+        echo "  FAIL  $name — expected JSON ask, got: $out"
+        fail=$((fail+1))
+    fi
+}
+
 # Edit/Write hook: JSON deny on stdout = block; empty stdout = allow.
 run_editwrite_block() {
     local name="$1" payload="$2"
@@ -54,11 +68,25 @@ run_editwrite_allow() {
     local name="$1" payload="$2"
     local out
     out=$(echo "$payload" | "$HOOKS/edit-write-guard.py" 2>/dev/null)
-    if [[ -z "$out" ]] || ! echo "$out" | grep -q '"permissionDecision": "deny"'; then
+    # Allow = silent exit (no JSON). Ask is not allow.
+    if [[ -z "$out" ]]; then
         echo "  ok    $name"
         pass=$((pass+1))
     else
-        echo "  FAIL  $name — expected allow, got: $out"
+        echo "  FAIL  $name — expected silent allow, got: $out"
+        fail=$((fail+1))
+    fi
+}
+
+run_editwrite_ask() {
+    local name="$1" payload="$2"
+    local out
+    out=$(echo "$payload" | "$HOOKS/edit-write-guard.py" 2>/dev/null)
+    if echo "$out" | grep -q '"permissionDecision": "ask"'; then
+        echo "  ok    $name"
+        pass=$((pass+1))
+    else
+        echo "  FAIL  $name — expected JSON ask, got: $out"
         fail=$((fail+1))
     fi
 }
@@ -131,6 +159,22 @@ run_bash "block wget -O foo.py"        2 '{"tool_name":"Bash","tool_input":{"com
 run_bash "allow curl api"              0 '{"tool_name":"Bash","tool_input":{"command":"curl https://api.github.com/user"}}'
 run_bash "allow curl -o json"          0 '{"tool_name":"Bash","tool_input":{"command":"curl -o /tmp/data.json https://api.example.com/data"}}'
 
+# --- Bash scope check (writeAllowRoots) -----------------------------------
+BPROJ=$(mktemp -d /tmp/guardrails-bproj-XXXXXX)
+run_bash "scope: redirect inside /tmp"  0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > /tmp/scratch.txt"},"cwd":"%s"}' "$BPROJ")"
+run_bash "scope: redirect inside cwd"   0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > %s/foo.txt"},"cwd":"%s"}' "$BPROJ" "$BPROJ")"
+run_bash "scope: relative redirect"     0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > ./foo.txt"},"cwd":"%s"}' "$BPROJ")"
+run_bash_ask "scope: redirect to /etc" \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > /etc/foo"},"cwd":"%s"}' "$BPROJ")"
+run_bash_ask "scope: append to outside path" \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x >> /Users/x/.gitconfig"},"cwd":"%s"}' "$BPROJ")"
+run_bash_ask "scope: tee outside" \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x | tee /Users/x/notes.txt"},"cwd":"%s"}' "$BPROJ")"
+rmdir "$BPROJ"
+
 echo
 echo "edit-write-guard"
 run_editwrite_block "block .env"           '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/.env","new_string":"x"}}'
@@ -142,6 +186,9 @@ run_editwrite_block "block private key"    "$(printf '{"tool_name":"Write","tool
 run_editwrite_block "block .bashrc"        '{"tool_name":"Edit","tool_input":{"file_path":"/Users/x/.bashrc","new_string":"x"}}'
 run_editwrite_block "block .zshrc"         '{"tool_name":"Edit","tool_input":{"file_path":"/Users/x/.zshrc","new_string":"x"}}'
 run_editwrite_block "block LaunchAgents"   '{"tool_name":"Write","tool_input":{"file_path":"/Users/x/Library/LaunchAgents/com.evil.plist","content":"x"}}'
+run_editwrite_block "block macOS keychain" '{"tool_name":"Write","tool_input":{"file_path":"/Users/x/Library/Keychains/login.keychain-db","content":"x"}}'
+run_editwrite_block "block /etc/shadow"    '{"tool_name":"Edit","tool_input":{"file_path":"/etc/shadow","new_string":"x"}}'
+run_editwrite_block "block /etc/sudoers"   '{"tool_name":"Edit","tool_input":{"file_path":"/etc/sudoers","new_string":"x"}}'
 run_editwrite_block "block npm token"      "$(printf '{"tool_name":"Write","tool_input":{"file_path":"/tmp/x.md","content":"%s"}}' "$NPM_TOKEN")"
 run_editwrite_block "block GCP svc acct"   "$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"Write","tool_input":{"file_path":"/tmp/sa.json","content":sys.argv[1]}}))' "$GCP_SVC")"
 run_editwrite_allow "allow source edit"    '{"tool_name":"Edit","tool_input":{"file_path":"/tmp/foo.ts","new_string":"const x = 1"}}'
@@ -159,6 +206,26 @@ ln -s /Users/dummy/.ssh/id_rsa "$SYM"
 run_editwrite_block "block symlink to ssh key" \
     "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"%s","new_string":"x"}}' "$SYM")"
 rm -f "$SYM"
+
+# --- Scope check (writeAllowRoots) -----------------------------------------
+# When cwd is supplied, paths inside cwd or pre-approved roots silently allow;
+# anything else is `ask`.
+PROJ=$(mktemp -d /tmp/guardrails-proj-XXXXXX)
+mkdir -p "$PROJ/src"
+
+run_editwrite_allow "scope: inside cwd" \
+    "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s/src/foo.ts","content":"x"},"cwd":"%s"}' "$PROJ" "$PROJ")"
+run_editwrite_allow "scope: in /tmp (allow root)" \
+    "$(printf '{"tool_name":"Write","tool_input":{"file_path":"/tmp/scratch.txt","content":"x"},"cwd":"%s"}' "$PROJ")"
+run_editwrite_ask   "scope: outside cwd and roots" \
+    "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"/Users/x/.gitconfig","new_string":"x"},"cwd":"%s"}' "$PROJ")"
+run_editwrite_ask   "scope: edit /etc/something" \
+    "$(printf '{"tool_name":"Write","tool_input":{"file_path":"/etc/foo","content":"x"},"cwd":"%s"}' "$PROJ")"
+# PATH_DENY beats scope: even a sensitive path inside cwd is hard-denied.
+run_editwrite_block "scope: PATH_DENY beats cwd allow" \
+    "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s/.ssh/id_rsa","content":"x"},"cwd":"%s"}' "$PROJ" "$PROJ")"
+
+rmdir "$PROJ/src" "$PROJ"
 
 echo
 echo "audit"

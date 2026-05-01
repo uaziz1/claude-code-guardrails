@@ -98,6 +98,25 @@ cp ~/.claude/settings.json ~/.claude/settings.json.pre-guardrails.bak
 
 Restart Claude Code. `/status` shows the hooks registered. To verify they actually fire, ask the agent to run `rm -rf /tmp/anything` — you should see `bash-guard blocked: rm -rf …` and the agent stopped.
 
+## Scope check (principle of least privilege)
+
+The hook does more than denylist sensitive paths — it also enforces a **write-scope** rule: writes inside the project (`$CWD`) are silent allow, writes to known sensitive paths are deny, and **anything else** outside the project is `ask`. The agent has to surface a permission prompt before it can edit something like `~/.gitconfig` or `/var/log/foo`. This is principle-of-least-privilege at the hook layer: even if a path isn't on the denylist, simply being outside the project requires explicit approval.
+
+A few transient/cache locations are pre-approved so normal workflows don't drown in prompts:
+
+```
+$CWD               (project root, always)
+/tmp, /private/tmp, /var/tmp, $TMPDIR
+~/.cache           (XDG cache)
+~/Library/Caches   (macOS)
+```
+
+To pre-approve more without editing the hook, set `CCG_WRITE_ALLOW_ROOTS` (comma-separated). Or edit `WRITE_ALLOW_ROOTS` at the top of [`bash-guard.py`](hooks/bash-guard.py) / [`edit-write-guard.py`](hooks/edit-write-guard.py).
+
+The Bash hook applies the same check to redirect/`tee`/`dd of=` destinations, so `echo x > /etc/foo` triggers the `ask` even though the path isn't on any denylist.
+
+For OS-level confinement that the hook *can't* provide (heredoc bypasses, runtime-computed command names), enable Anthropic's [sandbox](https://code.claude.com/docs/en/settings). The hook is policy; the sandbox is locks.
+
 ## Layered model
 
 `permissions` and `hooks` are **two layers, not one**.

@@ -15,7 +15,23 @@ the dangerous text appearing anywhere, and trying to AST-parse it just
 shifts complexity for no security gain (and is itself bypassable via
 heredoc bodies, runtime-computed names, etc.).
 """
-import json, re, sys
+import json, re, sys, os
+
+
+# Roots where bash writes are pre-approved without prompting. Project CWD
+# is always allowed; this list extends it with transient/cache locations.
+# Anything outside both gets `ask` (PrincipleOfLeastPrivilege at the boundary).
+# Edit this list — or set CCG_WRITE_ALLOW_ROOTS — to pre-approve more.
+_HOME = os.path.expanduser("~")
+WRITE_ALLOW_ROOTS = [r for r in (
+    "/tmp", "/private/tmp", "/var/tmp",
+    os.environ.get("TMPDIR", "").rstrip("/") or None,
+    os.path.join(_HOME, ".cache"),
+    os.path.join(_HOME, "Library/Caches"),
+) if r]
+WRITE_ALLOW_ROOTS += [
+    r.rstrip("/") for r in os.environ.get("CCG_WRITE_ALLOW_ROOTS", "").split(",") if r.strip()
+]
 
 
 # Sensitive paths — secret-bearing tokens any read/write/move command might
@@ -139,6 +155,63 @@ PATTERNS = [
 ]
 
 
+def ask(reason):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": reason,
+        }
+    }))
+    sys.exit(0)
+
+
+def in_allow_root(path, cwd):
+    """True if resolved `path` is inside `cwd` or any WRITE_ALLOW_ROOTS root."""
+    if not path:
+        return False
+    try:
+        p = os.path.realpath(path)
+    except Exception:
+        p = path
+    for root in ([cwd] if cwd else []) + WRITE_ALLOW_ROOTS:
+        if not root:
+            continue
+        try:
+            r = os.path.realpath(root)
+        except Exception:
+            r = root
+        if p == r or p.startswith(r.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def find_write_targets(cmd):
+    """Best-effort extraction of write destinations from a Bash command.
+    Covers redirects (`>`, `>>`, including `2>`/`&>`), `tee`, and `dd of=`.
+    Cp/mv/rm/mkdir/touch positional args are not parsed — those are
+    covered by SENSITIVE_PATH and PATH_DENY for the dangerous cases.
+    """
+    targets = []
+    # Redirects: optional fd prefix, > or >>, optional quote, then path.
+    # Excludes command-substitution constructs ($(...), `...`).
+    for m in re.finditer(
+        r"[12&]?>{1,2}\s*([\"']?)([^\s\"';|&<>`$]+)\1",
+        cmd,
+    ):
+        targets.append(m.group(2))
+    # tee with optional flags
+    for m in re.finditer(
+        r"\btee\b(?:\s+-\S+)*\s+([\"']?)([^\s\"';|&<>`$]+)\1",
+        cmd,
+    ):
+        targets.append(m.group(2))
+    # dd of=
+    for m in re.finditer(r"\bdd\b[^|;&]*?\bof=([^\s|;&]+)", cmd):
+        targets.append(m.group(1))
+    return targets
+
+
 def main():
     data = json.load(sys.stdin)
     if data.get("tool_name") != "Bash":
@@ -146,7 +219,9 @@ def main():
     cmd = data.get("tool_input", {}).get("command", "")
     if not cmd.strip():
         sys.exit(0)
+    cwd = data.get("cwd") or ""
 
+    # Hard-block patterns first (deny via exit 2).
     for pat, label in PATTERNS:
         if re.search(pat, cmd):
             print(f"bash-guard blocked: {label}", file=sys.stderr)
@@ -154,6 +229,16 @@ def main():
             print(f"  pattern: {pat}", file=sys.stderr)
             print("  Edit ~/.claude/hooks/bash-guard.py to adjust.", file=sys.stderr)
             sys.exit(2)
+
+    # Scope check: any write target outside cwd + WRITE_ALLOW_ROOTS → ask.
+    if cwd:
+        for tgt in find_write_targets(cmd):
+            tgt_abs = tgt if os.path.isabs(tgt) else os.path.join(cwd, tgt)
+            if not in_allow_root(tgt_abs, cwd):
+                ask(
+                    f"bash write target outside project root and pre-approved roots: {tgt}\n"
+                    f"(cwd={cwd}; pre-approved={', '.join(WRITE_ALLOW_ROOTS) or '(none)'})"
+                )
 
 
 if __name__ == "__main__":

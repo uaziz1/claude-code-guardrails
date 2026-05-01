@@ -63,7 +63,13 @@
       "Edit(.github/workflows/**)",
       "Edit(.claude/**)",
       "Edit(.mcp.json)",
-      "Edit(.husky/**)"
+      "Edit(.husky/**)",
+      "Read(~/Library/Keychains/**)",
+      "Read(~/Library/Cookies/**)",
+      "Edit(/etc/shadow)",
+      "Edit(/etc/sudoers)",
+      "Edit(/etc/sudoers.d/**)",
+      "Edit(/etc/passwd)"
     ],
     "ask": [
       "Bash(rm *)",
