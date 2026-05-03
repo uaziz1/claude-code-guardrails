@@ -34,6 +34,37 @@ WRITE_ALLOW_ROOTS += [
 ]
 
 
+# Roots whose contents are credential-shaped but the agent legitimately reads
+# from them (e.g. `~/.cyrus/` holds Cyrus's `.env`-shaped credentials file).
+# These are exempted from the SENSITIVE_PATH scan ONLY — `rm -rf`, pipe-to-
+# shell, etc. still apply if the command happens to touch one of these paths.
+# Override with comma-separated CCG_BASH_SENSITIVE_EXEMPT.
+SENSITIVE_EXEMPT_ROOTS = [
+    p.rstrip("/") for p in os.environ.get(
+        "CCG_BASH_SENSITIVE_EXEMPT", "~/.cyrus"
+    ).split(",") if p.strip()
+]
+
+
+def _strip_exempt_paths(cmd):
+    """Replace exempt-root path tokens with a placeholder for the
+    SENSITIVE_PATH scan. The match stops at shell metacharacters so chained
+    commands (`; | & < > ( ) backtick $`) and quotes don't get swallowed —
+    otherwise greedy non-whitespace would consume `;rm -rf /` and bypass
+    the destructive-command rules.
+    """
+    out = cmd
+    for root in SENSITIVE_EXEMPT_ROOTS:
+        # Match both ~ form and absolute form.
+        for r in {root, os.path.expanduser(root)}:
+            out = re.sub(
+                re.escape(r) + r"(?:/[^\s;&|<>()'\"`$]*)?",
+                "__exempt_path__",
+                out,
+            )
+    return out
+
+
 # Sensitive paths — secret-bearing tokens any read/write/move command might
 # touch. Word-boundary-anchored so .env.example etc. is exempt.
 # `@` is included so curl's `--data @file` / `--upload-file @file` forms,
@@ -221,9 +252,15 @@ def main():
         sys.exit(0)
     cwd = data.get("cwd") or ""
 
+    # SENSITIVE_PATH gets exempt-root paths stripped so legitimate access
+    # to e.g. ~/.cyrus/credentials doesn't false-positive. All other
+    # patterns (rm -rf, pipe-to-shell, etc.) still see the original cmd.
+    sens_cmd = _strip_exempt_paths(cmd)
+
     # Hard-block patterns first (deny via exit 2).
     for pat, label in PATTERNS:
-        if re.search(pat, cmd):
+        haystack = sens_cmd if pat is SENSITIVE_PATH else cmd
+        if re.search(pat, haystack):
             print(f"bash-guard blocked: {label}", file=sys.stderr)
             print(f"  command: {cmd}", file=sys.stderr)
             print(f"  pattern: {pat}", file=sys.stderr)

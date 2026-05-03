@@ -149,6 +149,19 @@ run_bash "block scp .env"              2 '{"tool_name":"Bash","tool_input":{"com
 run_bash "allow .env.example"          0 '{"tool_name":"Bash","tool_input":{"command":"cat .env.example"}}'
 run_bash "allow .env.sample"           0 '{"tool_name":"Bash","tool_input":{"command":"cat .env.sample"}}'
 
+# Exempt roots (CCG_BASH_SENSITIVE_EXEMPT, default ~/.cyrus): credential-shaped
+# files under these roots may be read, but other dangerous patterns still apply
+# even when the path lives under the exempt root.
+run_bash "allow cat ~/.cyrus/.env"     0 '{"tool_name":"Bash","tool_input":{"command":"cat ~/.cyrus/credentials.env"}}'
+run_bash "allow source ~/.cyrus/.env"  0 '{"tool_name":"Bash","tool_input":{"command":"source ~/.cyrus/.env"}}'
+run_bash "allow cat $HOME/.cyrus/.env" 0 "$(printf '{"tool_name":"Bash","tool_input":{"command":"cat %s/.cyrus/.env"}}' "$HOME")"
+# Bypass guard: greedy match must NOT swallow shell metacharacters.
+run_bash "block exempt;rm -rf bypass"  2 '{"tool_name":"Bash","tool_input":{"command":"cat ~/.cyrus/.env;rm -rf /tmp/x"}}'
+run_bash "block exempt eval bypass"    2 '{"tool_name":"Bash","tool_input":{"command":"eval $(cat ~/.cyrus/.env)"}}'
+run_bash "block exempt && sudo bypass" 2 '{"tool_name":"Bash","tool_input":{"command":"cat ~/.cyrus/.env && sudo whoami"}}'
+# Non-exempt sibling dir still blocks.
+run_bash "block cat ~/.cyruslike/.env" 2 '{"tool_name":"Bash","tool_input":{"command":"cat ~/.cyruslike/.env"}}'
+
 # python -m (arbitrary module exec — was previously open via -m)
 run_bash "block python -m"             2 '{"tool_name":"Bash","tool_input":{"command":"python3 -m base64 -d secrets.b64"}}'
 
