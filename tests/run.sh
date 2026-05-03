@@ -217,6 +217,10 @@ run_editwrite_allow "scope: inside cwd" \
     "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s/src/foo.ts","content":"x"},"cwd":"%s"}' "$PROJ" "$PROJ")"
 run_editwrite_allow "scope: in /tmp (allow root)" \
     "$(printf '{"tool_name":"Write","tool_input":{"file_path":"/tmp/scratch.txt","content":"x"},"cwd":"%s"}' "$PROJ")"
+# Conductor/worktree: session CWD differs from canonical project path under
+# ~/.claude/projects/<id>/memory/. Auto-memory writes must silent-allow.
+run_editwrite_allow "scope: auto-memory from worktree cwd" \
+    "$(printf '{"tool_name":"Write","tool_input":{"file_path":"%s/.claude/projects/-Users-x-Dev-foo/memory/note.md","content":"x"},"cwd":"%s"}' "$HOME" "$PROJ")"
 run_editwrite_ask   "scope: outside cwd and roots" \
     "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"/Users/x/.gitconfig","new_string":"x"},"cwd":"%s"}' "$PROJ")"
 run_editwrite_ask   "scope: edit /etc/something" \

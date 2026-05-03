@@ -37,6 +37,7 @@ WRITE_ALLOW_ROOTS = [r for r in (
     os.environ.get("TMPDIR", "").rstrip("/") or None,
     os.path.join(_HOME, ".cache"),         # XDG cache (Linux + cross-platform tools)
     os.path.join(_HOME, "Library/Caches"), # macOS — harmless on other OSes
+    os.path.join(_HOME, ".claude/projects"),  # auto-memory dir — CWD differs from canonical project path under worktrees (e.g. Conductor)
 ) if r]
 # Optional comma-separated env-var override for project-specific roots
 # without editing this file.
