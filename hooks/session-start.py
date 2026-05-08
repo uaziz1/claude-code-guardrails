@@ -4,6 +4,9 @@ project's .claude/settings.json (post-CVE-2025-59536 hygiene).
 """
 import json, sys, os, pathlib, datetime, subprocess
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _mode import mode_with_source  # noqa: E402
+
 
 def main():
     data = json.load(sys.stdin)
@@ -74,6 +77,8 @@ def main():
         ).stdout.strip()
     except Exception:
         head = ""
+    mode, mode_src = mode_with_source(cwd)
+
     entry = {
         "ts": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
         "event": "session_start",
@@ -83,6 +88,8 @@ def main():
         "user": os.environ.get("USER"),
         "host": os.uname().nodename,
         "red_flags": flags,
+        "guardrail_mode": mode,
+        "guardrail_mode_source": mode_src,
     }
     with log_file.open("a") as f:
         f.write(json.dumps(entry) + "\n")
@@ -93,6 +100,15 @@ def main():
             print(f"  - {f}", file=sys.stderr)
         print("Inspect, remove, or bypass intentionally.", file=sys.stderr)
         sys.exit(2)
+
+    # Banner: visible reminder when running relaxed.
+    if mode != "strict":
+        print(
+            f"guardrails: mode={mode} ({mode_src}). "
+            "Catastrophic patterns still block; other patterns relaxed. "
+            "Run `guardrails strict` to restore.",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

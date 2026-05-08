@@ -17,6 +17,9 @@ heredoc bodies, runtime-computed names, etc.).
 """
 import json, re, sys, os
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _mode import current_mode  # noqa: E402
+
 
 # Roots where bash writes are pre-approved without prompting. Project CWD
 # is always allowed; this list extends it with transient/cache locations.
@@ -82,107 +85,113 @@ SENSITIVE_PATH = (
 )
 
 
+# Each entry is (pattern, label, tier). Tier "catastrophic" enforces in
+# both modes; "strict" is dropped in build mode. Build mode keeps anything
+# that destroys data irrecoverably, escalates privilege, exfils secrets,
+# or formats devices, and drops things the agent legitimately needs while
+# iterating (interpreter -c/-e, find -exec, command substitution, lower-
+# blast-radius git ops, etc.).
 PATTERNS = [
     # rm with both -r/-R and -f flags in any order
     (r"\brm\s+-[A-Za-z]*[rR][A-Za-z]*[fF]\b",
-        "rm -rf (or -fr / -Rf / -fR variant)"),
+        "rm -rf (or -fr / -Rf / -fR variant)", "catastrophic"),
     (r"\brm\s+-[A-Za-z]*[fF][A-Za-z]*[rR]\b",
-        "rm -fr (or -rf variant)"),
+        "rm -fr (or -rf variant)", "catastrophic"),
     (r"\brm\s+(?:[^|;&]*?\s)?--recursive\b[^|;&]*?--force\b",
-        "rm --recursive --force"),
+        "rm --recursive --force", "catastrophic"),
     (r"\brm\s+(?:[^|;&]*?\s)?--force\b[^|;&]*?--recursive\b",
-        "rm --force --recursive"),
+        "rm --force --recursive", "catastrophic"),
 
     # git destructive operations
     (r"\bgit\s+push\s+[^|;&]*?(?:--force(?!-with-lease)|-f\b)",
-        "git push --force"),
+        "git push --force", "catastrophic"),
     (r"\bgit\s+push\s+[^|;&]*?--force-with-lease\b",
-        "git push --force-with-lease"),
+        "git push --force-with-lease", "catastrophic"),
     # `git push origin +main` is force-push in disguise — `+refspec` syntax
     # is documented git for "allow non-fast-forward". Match a `+` token that
     # looks like a refspec arg (preceded by whitespace, not a flag).
     (r"\bgit\s+push\s+[^|;&]*?\s\+[A-Za-z0-9._/-]+(?::[A-Za-z0-9._/-]+)?(\s|$)",
-        "git push +refspec (force in disguise)"),
+        "git push +refspec (force in disguise)", "catastrophic"),
     (r"\bgit\s+reset\s+[^|;&]*?--hard\b",
-        "git reset --hard"),
-    (r"\bgit\s+clean\s+[^|;&]*?-[A-Za-z]*f",
-        "git clean -f"),
-    (r"\bgit\s+checkout\s+--(\s|$)",
-        "git checkout --"),
-    (r"\bgit\s+checkout\s+\.(\s|$)",
-        "git checkout ."),
-    (r"\bgit\s+restore\b",
-        "git restore"),
-    (r"\bgit\s+branch\s+[^|;&]*?-D\b",
-        "git branch -D"),
+        "git reset --hard", "catastrophic"),
     (r"\bgit\s+filter-branch\b",
-        "git filter-branch"),
+        "git filter-branch", "catastrophic"),
     (r"\bgit\s+config\s+[^|;&]*?core\.hooksPath\b",
-        "git config core.hooksPath"),
-    (r"\bgit\s+stash\s+(?:drop|clear)\b",
-        "git stash drop/clear"),
-    (r"\bgit\s+update-ref\s+[^|;&]*?-d\b",
-        "git update-ref -d"),
-    (r"\bgit\s+submodule\s+deinit\s+[^|;&]*?-f\b",
-        "git submodule deinit -f"),
-    (r"\bgit\s+gc\s+[^|;&]*?--prune\b",
-        "git gc --prune"),
+        "git config core.hooksPath", "catastrophic"),
     (r"\bgit\s+reflog\s+(?:expire|delete)\b",
-        "git reflog expire/delete"),
+        "git reflog expire/delete", "catastrophic"),
+    (r"\bgit\s+clean\s+[^|;&]*?-[A-Za-z]*f",
+        "git clean -f", "strict"),
+    (r"\bgit\s+checkout\s+--(\s|$)",
+        "git checkout --", "strict"),
+    (r"\bgit\s+checkout\s+\.(\s|$)",
+        "git checkout .", "strict"),
+    (r"\bgit\s+restore\b",
+        "git restore", "strict"),
+    (r"\bgit\s+branch\s+[^|;&]*?-D\b",
+        "git branch -D", "strict"),
+    (r"\bgit\s+stash\s+(?:drop|clear)\b",
+        "git stash drop/clear", "strict"),
+    (r"\bgit\s+update-ref\s+[^|;&]*?-d\b",
+        "git update-ref -d", "strict"),
+    (r"\bgit\s+submodule\s+deinit\s+[^|;&]*?-f\b",
+        "git submodule deinit -f", "strict"),
+    (r"\bgit\s+gc\s+[^|;&]*?--prune\b",
+        "git gc --prune", "strict"),
 
     # System / privilege escalation
-    (r"\bsudo\b",                                  "sudo"),
-    (r"\bdoas\b",                                  "doas"),
-    (r"\bpkexec\b",                                "pkexec"),
-    (r"\beval\s",                                  "eval"),
+    (r"\bsudo\b",                                  "sudo", "catastrophic"),
+    (r"\bdoas\b",                                  "doas", "catastrophic"),
+    (r"\bpkexec\b",                                "pkexec", "catastrophic"),
+    (r"\beval\s",                                  "eval", "strict"),
 
     # Disk / filesystem destructive
-    (r"\bdd\s+",                                   "dd"),
-    (r"\bmkfs\.",                                  "mkfs.* (format filesystem)"),
-    (r"\bshred\b",                                 "shred"),
-    (r"\bwipefs\b",                                "wipefs"),
-    (r">\s*/dev/(sd|nvme|disk[0-9]|hd|md)",        "redirect to block device"),
-    (r":\(\)\s*\{\s*:\|:&\s*\};:",                 "fork bomb"),
+    (r"\bdd\s+",                                   "dd", "catastrophic"),
+    (r"\bmkfs\.",                                  "mkfs.* (format filesystem)", "catastrophic"),
+    (r"\bshred\b",                                 "shred", "catastrophic"),
+    (r"\bwipefs\b",                                "wipefs", "catastrophic"),
+    (r">\s*/dev/(sd|nvme|disk[0-9]|hd|md)",        "redirect to block device", "catastrophic"),
+    (r":\(\)\s*\{\s*:\|:&\s*\};:",                 "fork bomb", "catastrophic"),
 
     # Network exfil / shell-from-stream
     (r"\b(?:curl|wget)\s+[^|;&]*?\|\s*(?:sh|bash|zsh|dash|ksh)\b",
-        "curl|wget piped to shell"),
+        "curl|wget piped to shell", "catastrophic"),
     # curl/wget saving to an executable-looking path → high odds of
     # download-then-execute on the next command.
     (r"\b(?:curl|wget)\s+[^|;&]*?(?:-o|--output|-O)\s+\S+\.(?:sh|bash|zsh|py|rb|pl|exe|bat|ps1|cmd|scr|jar)\b",
-        "curl|wget output to script/executable"),
-    (r"\bnc\s+(?:[^|;&]*?\s)?-l\b",                "nc -l (listener)"),
-    (r"\bnc\s+(?:[^|;&]*?\s)?-e\b",                "nc -e (command exec)"),
-    (r"\bsocat\b",                                 "socat"),
+        "curl|wget output to script/executable", "catastrophic"),
+    (r"\bnc\s+(?:[^|;&]*?\s)?-l\b",                "nc -l (listener)", "catastrophic"),
+    (r"\bnc\s+(?:[^|;&]*?\s)?-e\b",                "nc -e (command exec)", "catastrophic"),
+    (r"\bsocat\b",                                 "socat", "catastrophic"),
 
     # Shell -c: arbitrary inline command. The most direct bypass otherwise.
     (r"\b(?:bash|zsh|fish|ksh|dash|sh)\s+(?:[^|;&]*?\s)?-c\b",
-        "shell -c (bash/zsh/fish/ksh/dash/sh)"),
+        "shell -c (bash/zsh/fish/ksh/dash/sh)", "strict"),
 
     # Interpreter -c / -e / -m: arbitrary code via Bash
     (r"\b(?:python|python3|python2)\s+(?:[^|;&]*?\s)?-c\b",
-        "python -c"),
+        "python -c", "strict"),
     (r"\b(?:python|python3|python2)\s+(?:[^|;&]*?\s)?-m\b",
-        "python -m (arbitrary module exec)"),
+        "python -m (arbitrary module exec)", "strict"),
     (r"\b(?:node|deno)\s+(?:[^|;&]*?\s)?(?:-e|--eval)\b",
-        "node/deno -e"),
+        "node/deno -e", "strict"),
     (r"\bperl\s+(?:[^|;&]*?\s)?-e\b",
-        "perl -e"),
+        "perl -e", "strict"),
     (r"\bruby\s+(?:[^|;&]*?\s)?-e\b",
-        "ruby -e"),
+        "ruby -e", "strict"),
 
     # find -exec / -delete: arbitrary command execution per match
     (r"\bfind\s+[^|;&]*?-(?:exec|execdir|delete)\b",
-        "find -exec / -execdir / -delete"),
+        "find -exec / -execdir / -delete", "strict"),
 
     # Command substitution in command position (rare in legit usage)
-    (r"(?:^|[;&|]\s*)\$\(",                        "$( ... ) as command"),
-    (r"(?:^|[;&|]\s*)`",                           "backtick substitution as command"),
+    (r"(?:^|[;&|]\s*)\$\(",                        "$( ... ) as command", "strict"),
+    (r"(?:^|[;&|]\s*)`",                           "backtick substitution as command", "strict"),
 
     # Sensitive-path access. Catches reads (cat/head/less/sed/grep/xxd/base64/
     # tee), copies/renames (cp/mv/ln) and exfil (scp/rsync) of credentials,
     # which would otherwise bypass the Edit/Write hook entirely.
-    (SENSITIVE_PATH, "command references sensitive path"),
+    (SENSITIVE_PATH, "command references sensitive path", "catastrophic"),
 ]
 
 
@@ -251,6 +260,7 @@ def main():
     if not cmd.strip():
         sys.exit(0)
     cwd = data.get("cwd") or ""
+    mode = current_mode(cwd)
 
     # SENSITIVE_PATH gets exempt-root paths stripped so legitimate access
     # to e.g. ~/.cyrus/credentials doesn't false-positive. All other
@@ -258,17 +268,22 @@ def main():
     sens_cmd = _strip_exempt_paths(cmd)
 
     # Hard-block patterns first (deny via exit 2).
-    for pat, label in PATTERNS:
+    for pat, label, tier in PATTERNS:
+        if mode == "build" and tier != "catastrophic":
+            continue
         haystack = sens_cmd if pat is SENSITIVE_PATH else cmd
         if re.search(pat, haystack):
             print(f"bash-guard blocked: {label}", file=sys.stderr)
             print(f"  command: {cmd}", file=sys.stderr)
             print(f"  pattern: {pat}", file=sys.stderr)
+            print(f"  mode:    {mode}", file=sys.stderr)
             print("  Edit ~/.claude/hooks/bash-guard.py to adjust.", file=sys.stderr)
             sys.exit(2)
 
     # Scope check: any write target outside cwd + WRITE_ALLOW_ROOTS → ask.
-    if cwd:
+    # Skipped in build mode — when iterating, redirecting to /var/log/foo
+    # or wherever shouldn't prompt.
+    if cwd and mode != "build":
         for tgt in find_write_targets(cmd):
             tgt_abs = tgt if os.path.isabs(tgt) else os.path.join(cwd, tgt)
             if not in_allow_root(tgt_abs, cwd):

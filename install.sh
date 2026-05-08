@@ -42,7 +42,7 @@ echo "==> Creating $HOOKS_DIR and $LOGS_DIR"
 mkdir -p "$HOOKS_DIR" "$LOGS_DIR"
 
 echo "==> Copying hooks"
-for f in bash-guard.py edit-write-guard.py audit.py session-start.py; do
+for f in bash-guard.py edit-write-guard.py audit.py session-start.py _mode.py; do
     src="$REPO_DIR/hooks/$f"
     dst="$HOOKS_DIR/$f"
     # Idempotent: if dst already resolves to src (symlink/hardlink), skip
@@ -102,5 +102,23 @@ else
 fi
 
 echo
+echo "==> guardrails CLI"
+GUARDRAILS_BIN="$HOME/.local/bin/guardrails"
+mkdir -p "$HOME/.local/bin"
+if [[ -e "$GUARDRAILS_BIN" && ! -L "$GUARDRAILS_BIN" ]]; then
+    echo "    $GUARDRAILS_BIN exists and is not a symlink — leaving alone."
+else
+    ln -sf "$REPO_DIR/bin/guardrails" "$GUARDRAILS_BIN"
+    echo "    $GUARDRAILS_BIN -> $REPO_DIR/bin/guardrails"
+fi
+case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) echo "    Note: $HOME/.local/bin is not in PATH. Add it to use 'guardrails' directly." ;;
+esac
+
+echo
 echo "Restart Claude Code; verify with /status."
 echo "Run ./tests/run.sh to smoke-test the installed hooks."
+echo
+echo "Modes: 'guardrails build' relaxes to catastrophic-only; 'guardrails strict'"
+echo "restores. 'guardrails status' shows the active mode and source."

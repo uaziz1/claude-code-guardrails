@@ -65,7 +65,7 @@ npm / SendGrid / Slack tokens, GCP service-account JSON, or PEM private
 keys.
 ```
 
-`./tests/run.sh` exercises every category above (88 cases).
+`./tests/run.sh` exercises every category above (126 cases).
 
 ## What it ships
 
@@ -74,9 +74,11 @@ keys.
 | `bash-guard.py` | `PreToolUse:Bash` | Regex-scan the raw command for dangerous patterns wherever they appear — chains, wrappers, env-runners, subshells. Exit 2 to block. Also scope-checks redirect / `tee` / `dd of=` destinations and returns `ask` for writes outside the project. |
 | `edit-write-guard.py` | `PreToolUse:Edit\|Write` | Match the requested path **and its symlink target** against a sensitive-path list (case-insensitive). Scan content for credential shapes. Apply scope check: silent allow inside `$CWD` + pre-approved roots, `ask` outside, deny on sensitive paths. JSON `permissionDecision` on stdout (exit 2 is unreliable for these tools per [#13744](https://github.com/anthropics/claude-code/issues/13744)). |
 | `audit.py` | `PostToolUse` | Append a JSON line per tool call to `~/.claude/session-logs/YYYY-MM-DD.jsonl`. Always non-blocking — every error path returns 0. |
-| `session-start.py` | `SessionStart` | Log environment + git HEAD. Refuse to start if the project's `.claude/settings.json` contains `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `enableAllProjectMcpServers: true`, `autoApprove: true`, or hook commands that shell out via `curl` / `wget` / `bash -c` / command substitution. |
+| `session-start.py` | `SessionStart` | Log environment + git HEAD; print active-mode banner when not strict. Refuse to start if the project's `.claude/settings.json` contains `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `enableAllProjectMcpServers: true`, `autoApprove: true`, or hook commands that shell out via `curl` / `wget` / `bash -c` / command substitution. |
+| `_mode.py` | (helper) | Resolves the active mode (`strict` / `build`) from `<cwd>/.claude/guardrail-mode` → `~/.claude/guardrail-mode` → `strict` default. Imported by the other hooks. |
+| `bin/guardrails` | (CLI) | `guardrails build` / `strict` / `status`, with `--global` to target `~/.claude/` instead of `$PWD/.claude/`. |
 
-Each hook keeps its policy as a list literal at the top of the file — `PATTERNS`, `SENSITIVE_PATH`, `WRITE_ALLOW_ROOTS`, `PATH_DENY`, `CONTENT_DENY`. Edit those to customize.
+Each hook keeps its policy as a list literal at the top of the file — `PATTERNS`, `SENSITIVE_PATH`, `WRITE_ALLOW_ROOTS`, `PATH_DENY`, `CONTENT_DENY`. Edit those to customize. `PATTERNS` and `PATH_DENY` entries are tagged `catastrophic` or `strict` to control mode behaviour.
 
 ## Quick start
 
@@ -86,9 +88,10 @@ Requires Python 3.9+ (no third-party deps) and Claude Code ≥ 2.0.65 (see [CVE 
 git clone https://github.com/uaziz1/claude-code-guardrails.git
 cd claude-code-guardrails
 ./install.sh        # detects OS, copies hooks into ~/.claude/hooks/,
+                    # symlinks bin/guardrails into ~/.local/bin/,
                     # reports which platform-specific deny patterns
                     # are active, and offers to install settings.json
-./tests/run.sh      # 88 cases — should print "88 passed, 0 failed"
+./tests/run.sh      # 126 cases — should print "126 passed, 0 failed"
 ```
 
 If `~/.claude/settings.json` already exists, the installer asks you to merge the `permissions` and `hooks` blocks from `templates/settings.json` by hand. Back up first:
@@ -98,6 +101,35 @@ cp ~/.claude/settings.json ~/.claude/settings.json.pre-guardrails.bak
 ```
 
 Restart Claude Code. `/status` shows the hooks registered. To verify they actually fire, ask the agent to run `rm -rf /tmp/anything` — you should see `bash-guard blocked: rm -rf …` and the agent stopped.
+
+## Modes
+
+Two modes:
+
+- **strict** (default) — every pattern enforces, plus the write-scope check.
+- **build** — only patterns tagged *catastrophic* enforce. `bash -c`, `python -c`, `find -exec`, `eval`, command substitution as command, `git restore`, `git clean -f`, `git checkout --`, `git stash drop`, the write-scope check, and edits to `.git/`, `.github/workflows/`, `.claude/`, `.husky/`, shell rc files, etc. are skipped — so the agent can iterate freely while still being blocked from anything that can lose work, escalate privilege, format devices, or exfil secrets.
+
+`bin/guardrails` flips between them:
+
+```bash
+guardrails build          # this project (writes <pwd>/.claude/guardrail-mode)
+guardrails build -g       # globally   (writes ~/.claude/guardrail-mode)
+guardrails strict         # restore (delete the file)
+guardrails status         # show resolved mode + source
+```
+
+Resolution order: project file → global file → `strict` default. Project beats global, so you can run globally relaxed but tighten one specific project back. `session-start.py` prints a banner whenever the active mode isn't strict, so you don't forget you're loose.
+
+What stays *catastrophic* (always blocks, both modes):
+
+- `rm -rf` variants; `sudo` / `doas` / `pkexec`
+- `git push --force*` (incl. `--force-with-lease` and `+refspec`); `git reset --hard`; `git filter-branch`; `git config core.hooksPath`; `git reflog expire/delete`
+- `dd`, `mkfs.*`, `shred`, `wipefs`; redirect to block device; fork bomb
+- `curl`/`wget` piped to shell or saving to script/exe; `nc -l`/`-e`; `socat`
+- Reads/writes of `.env`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `.pem`/`.key`/`.crt`, kubeconfig, `.netrc`, `.npmrc`, `.pypirc`, macOS keychain/cookies/launchd, systemd-user/autostart, `/etc/shadow|sudoers|passwd`
+- All `CONTENT_DENY` shapes (AWS / GitHub / Stripe / Anthropic / OpenAI / npm / SendGrid / Slack tokens, GCP service-account JSON, PEM private keys) — credential exfil is never legitimate, regardless of mode
+
+The permissions layer in `templates/settings.json` mirrors this split: catastrophic patterns are duplicated there as belt-and-braces, while strict-only patterns are hook-controlled so build mode can actually relax them.
 
 ## Scope check (principle of least privilege)
 
@@ -163,8 +195,8 @@ The file path is on the command line; the body isn't. The same trick applies to 
 
 Each hook keeps policy in module-level lists:
 
-- `bash-guard.py` — `PATTERNS` (each entry `(regex, human-label)`) and `SENSITIVE_PATH`
-- `edit-write-guard.py` — `PATH_DENY`, `CONTENT_DENY`
+- `bash-guard.py` — `PATTERNS` (each entry `(regex, label, tier)` where tier is `catastrophic` or `strict`) and `SENSITIVE_PATH`
+- `edit-write-guard.py` — `PATH_DENY` (`(regex, label, tier)`), `CONTENT_DENY` (`(regex, label)`; always enforced, no tier)
 
 Project-specific *allow*lists belong in your project's `.claude/settings.json`. Keep `~/.claude/settings.json` minimal — the more you allow at user scope, the more you trust every project to behave.
 

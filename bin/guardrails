@@ -1,0 +1,95 @@
+#!/bin/bash
+# guardrails — toggle Claude Code guardrail mode (strict|build).
+#
+# Mode is resolved by hooks at runtime. Lookup order:
+#   1. <cwd>/.claude/guardrail-mode   (project scope; this CLI defaults here)
+#   2. ~/.claude/guardrail-mode        (global, with --global)
+#   3. "strict" (default; no file)
+set -euo pipefail
+
+usage() {
+    cat <<EOF
+Usage:
+  guardrails build [--global]    Relax to "build" mode.
+  guardrails strict [--global]   Restore strict mode (delete the file).
+  guardrails status              Show resolved mode and source.
+
+Without --global, writes/clears \$PWD/.claude/guardrail-mode.
+With --global, writes/clears ~/.claude/guardrail-mode.
+
+Project file beats global. "strict" is the default with no file.
+
+In build mode, only catastrophic patterns block:
+  rm -rf, sudo/doas/pkexec, git push --force*, git reset --hard,
+  git filter-branch, git config core.hooksPath, git reflog expire/delete,
+  dd, mkfs.*, shred, wipefs, redirect to block device, fork bomb,
+  curl|wget piped to shell, curl/wget output to script, nc -l/-e, socat,
+  reads/writes of credential paths (.env, ~/.ssh, ~/.aws, ~/.gnupg,
+  .pem/.key, /etc/shadow, keychain, launchd/systemd persistence), and any file
+  content matching credential shapes (AWS keys, GitHub PATs, etc.).
+
+The path-scope check (writes outside the project) is also skipped in build.
+EOF
+    exit 1
+}
+
+cmd="${1:-}"
+[[ -z "$cmd" ]] && usage
+shift || true
+
+scope_global=0
+for a in "$@"; do
+    case "$a" in
+        --global|-g) scope_global=1 ;;
+        -h|--help)   usage ;;
+        *)           usage ;;
+    esac
+done
+
+target_dir() {
+    if [[ "$scope_global" == "1" ]]; then
+        echo "$HOME/.claude"
+    else
+        echo "$(pwd)/.claude"
+    fi
+}
+
+case "$cmd" in
+    build)
+        d=$(target_dir)
+        mkdir -p "$d"
+        printf 'build\n' > "$d/guardrail-mode"
+        echo "guardrails: wrote $d/guardrail-mode (mode=build)"
+        echo
+        echo "Catastrophic patterns still block. Run \`guardrails strict\` to restore."
+        ;;
+    strict)
+        d=$(target_dir)
+        f="$d/guardrail-mode"
+        if [[ -f "$f" ]]; then
+            rm -- "$f"
+            echo "guardrails: removed $f (mode=strict, the default)"
+        else
+            echo "guardrails: already strict (no $f)"
+        fi
+        ;;
+    status)
+        proj="$(pwd)/.claude/guardrail-mode"
+        glob="$HOME/.claude/guardrail-mode"
+        if [[ -f "$proj" ]]; then
+            m=$(tr -d '[:space:]' < "$proj")
+            echo "mode=$m  source=project ($proj)"
+        elif [[ -f "$glob" ]]; then
+            m=$(tr -d '[:space:]' < "$glob")
+            echo "mode=$m  source=global ($glob)"
+        else
+            echo "mode=strict  source=default (no guardrail-mode file)"
+        fi
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        usage
+        ;;
+esac
