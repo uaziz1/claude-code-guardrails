@@ -29,7 +29,7 @@ def main():
             detail = detail[:4000] + "…(truncated)"
 
         entry = {
-            "ts": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+            "ts": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
             "session_id": data.get("session_id"),
             "cwd": data.get("cwd"),
             "tool": tool,

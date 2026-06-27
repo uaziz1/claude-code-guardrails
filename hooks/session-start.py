@@ -80,7 +80,7 @@ def main():
     mode, mode_src = mode_with_source(cwd)
 
     entry = {
-        "ts": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+        "ts": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
         "event": "session_start",
         "session_id": data.get("session_id"),
         "cwd": cwd,

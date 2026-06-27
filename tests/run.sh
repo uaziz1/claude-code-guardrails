@@ -186,6 +186,16 @@ run_bash_ask "scope: append to outside path" \
     "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x >> /Users/x/.gitconfig"},"cwd":"%s"}' "$BPROJ")"
 run_bash_ask "scope: tee outside" \
     "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x | tee /Users/x/notes.txt"},"cwd":"%s"}' "$BPROJ")"
+# Pseudo-devices are not filesystem writes — never prompt on them.
+run_bash "scope: stderr to /dev/null"   0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"grep -r foo . 2>/dev/null"},"cwd":"%s"}' "$BPROJ")"
+run_bash "scope: redirect to /dev/null" 0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > /dev/null"},"cwd":"%s"}' "$BPROJ")"
+run_bash "scope: tee /dev/stderr"       0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x | tee /dev/stderr"},"cwd":"%s"}' "$BPROJ")"
+# But a real block device is still catastrophic.
+run_bash "scope: /dev/sda still blocks" 2 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > /dev/sda"},"cwd":"%s"}' "$BPROJ")"
 rmdir "$BPROJ"
 
 echo
@@ -323,6 +333,17 @@ run_editwrite_block "build: still block AWS key content" \
 run_editwrite_allow "build: scope skipped (outside cwd)" \
     "$(printf '{"tool_name":"Edit","tool_input":{"file_path":"/Users/x/.gitconfig","new_string":"x"},"cwd":"%s"}' "$BUILD_PROJ")"
 
+# Walk-up: a project mode file at the root applies to subdirectories. cwd is a
+# nested subdir with no file of its own → inherits build from BUILD_PROJ root.
+mkdir -p "$BUILD_PROJ/memory/deep"
+run_bash "build: subdir inherits (python -c)" 0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"python3 -c pass"},"cwd":"%s/memory/deep"}' "$BUILD_PROJ")"
+run_bash "build: subdir inherits (scope skip)" 0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > /Users/x/.gitconfig"},"cwd":"%s/memory/deep"}' "$BUILD_PROJ")"
+run_bash "build: subdir still blocks rm -rf"  2 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"},"cwd":"%s/memory/deep"}' "$BUILD_PROJ")"
+rmdir "$BUILD_PROJ/memory/deep" "$BUILD_PROJ/memory"
+
 # Mode resolution: project file beats global. Set HOME to a temp dir with a
 # global guardrail-mode=build, but the project (cwd) has no file — global
 # applies. Use a strict-only pattern that build would drop.
@@ -344,6 +365,19 @@ rm -rf "$BUILD_PROJ"
 echo
 echo "audit"
 run_passthrough "appends log line"     audit.py        '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"isError":false}}'
+
+# Exit 0 alone isn't enough: audit swallows all exceptions, so a broken body
+# (e.g. datetime.UTC on Python <3.11) still exits 0 while writing nothing.
+# Assert an entry actually lands on disk.
+AUDIT_HOME=$(mktemp -d /tmp/guardrails-audithome-XXXXXX)
+echo '{"session_id":"t","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"isError":false}}' \
+    | HOME="$AUDIT_HOME" "$HOOKS/audit.py" >/dev/null 2>&1
+if grep -q '"tool": "Bash"' "$AUDIT_HOME/.claude/session-logs/"*.jsonl 2>/dev/null; then
+    echo "  ok    audit actually writes an entry"; pass=$((pass+1))
+else
+    echo "  FAIL  audit actually writes an entry — no log line found"; fail=$((fail+1))
+fi
+rm -rf "$AUDIT_HOME"
 
 # Audit must never block, even when the log dir is unwritable.
 HOME=/nonexistent/path-that-does-not-exist run_passthrough "exit 0 when home unwritable" audit.py \

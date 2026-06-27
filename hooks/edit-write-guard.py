@@ -87,7 +87,7 @@ PATH_DENY = [
     (r"(^|/)\.npmrc$",                               ".npmrc", "catastrophic"),
     (r"(^|/)\.pypirc$",                              ".pypirc", "catastrophic"),
     (r"(^|/)\.github/workflows/",                    "GitHub Actions workflow", "strict"),
-    (r"(^|/)\.claude/(?!session-logs/|projects/[^/]+/memory/)", "Claude config (not log/memory dirs)", "strict"),
+    (r"(^|/)\.claude/(?!session-logs/|projects/(canonical/)?[^/]+/(memory|10-sessions)/)", "Claude config (not log/memory dirs)", "strict"),
     (r"(^|/)\.mcp\.json$",                           "MCP config", "strict"),
     (r"(^|/)\.husky/",                               "git hook", "strict"),
     (r"(^|/)\.git/(?!info/)",                        ".git internals", "strict"),

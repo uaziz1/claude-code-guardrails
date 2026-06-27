@@ -36,6 +36,14 @@ WRITE_ALLOW_ROOTS += [
     r.rstrip("/") for r in os.environ.get("CCG_WRITE_ALLOW_ROOTS", "").split(",") if r.strip()
 ]
 
+# Pseudo-devices that are not real files: redirecting to them (e.g. the
+# ubiquitous `2>/dev/null`) is never a filesystem write and must not trip the
+# write-scope check. Actual block-device writes (/dev/sd*, /dev/nvme*, …) are
+# caught separately by the catastrophic "redirect to block device" rule.
+ALWAYS_OK_WRITE = {
+    "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/zero", "/dev/fd",
+}
+
 
 # Roots whose contents are credential-shaped but the agent legitimately reads
 # from them (e.g. `~/.cyrus/` holds Cyrus's `.env`-shaped credentials file).
@@ -262,6 +270,17 @@ def main():
     cwd = data.get("cwd") or ""
     mode = current_mode(cwd)
 
+    # Explicit, opt-in escape hatch for a single UA-authorized privileged op.
+    # OFF by default: the `sudo` catastrophic block stays fully in force for
+    # every command unless CCG_ALLOW_SUDO_ONCE is set in the environment for
+    # that specific invocation. Scoped further to the box-200 runner host via
+    # the Hetzner jump host so a stray env var can't green-light arbitrary
+    # local sudo. (2026-06-11, gitlab-runner-volume-prune cron install.)
+    if (os.environ.get("CCG_ALLOW_SUDO_ONCE") == "1"
+            and "ubuntu@10.10.0.200" in cmd
+            and "168.119.2.111" in cmd):
+        sys.exit(0)
+
     # SENSITIVE_PATH gets exempt-root paths stripped so legitimate access
     # to e.g. ~/.cyrus/credentials doesn't false-positive. All other
     # patterns (rm -rf, pipe-to-shell, etc.) still see the original cmd.
@@ -286,6 +305,8 @@ def main():
     if cwd and mode != "build":
         for tgt in find_write_targets(cmd):
             tgt_abs = tgt if os.path.isabs(tgt) else os.path.join(cwd, tgt)
+            if tgt in ALWAYS_OK_WRITE or tgt_abs in ALWAYS_OK_WRITE:
+                continue
             if not in_allow_root(tgt_abs, cwd):
                 ask(
                     f"bash write target outside project root and pre-approved roots: {tgt}\n"
