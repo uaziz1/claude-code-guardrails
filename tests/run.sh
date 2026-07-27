@@ -172,6 +172,16 @@ run_bash "block wget -O foo.py"        2 '{"tool_name":"Bash","tool_input":{"com
 run_bash "allow curl api"              0 '{"tool_name":"Bash","tool_input":{"command":"curl https://api.github.com/user"}}'
 run_bash "allow curl -o json"          0 '{"tool_name":"Bash","tool_input":{"command":"curl -o /tmp/data.json https://api.example.com/data"}}'
 
+# False-positive regressions: data in heredoc bodies and quoted strings is
+# NOT command structure. A backtick/$() inside a PR body, `.env` in echoed
+# prose, or a grep/awk pattern must not trip the structural scans — while an
+# unquoted command-substitution or credential read at command position still does.
+run_bash "allow backtick in heredoc body"  0 '{"tool_name":"Bash","tool_input":{"command":"cat > /tmp/mr.md <<EOF\n## Fix the `foo` flag (was unread)\nEOF"}}'
+run_bash "allow .env in echo prose"         0 '{"tool_name":"Bash","tool_input":{"command":"echo \"does it hit .env in normal reads\""}}'
+run_bash "allow .env in single-quoted grep" 0 '{"tool_name":"Bash","tool_input":{"command":"grep -iE '"'"'\\.env'"'"' notes.txt"}}'
+run_bash "block bare backtick command"      2 '{"tool_name":"Bash","tool_input":{"command":"`whoami`"}}'
+run_bash "block cat .env (unquoted)"        2 '{"tool_name":"Bash","tool_input":{"command":"cat .env"}}'
+
 # --- Bash scope check (writeAllowRoots) -----------------------------------
 BPROJ=$(mktemp -d /tmp/guardrails-bproj-XXXXXX)
 run_bash "scope: redirect inside /tmp"  0 \
@@ -196,6 +206,14 @@ run_bash "scope: tee /dev/stderr"       0 \
 # But a real block device is still catastrophic.
 run_bash "scope: /dev/sda still blocks" 2 \
     "$(printf '{"tool_name":"Bash","tool_input":{"command":"echo x > /dev/sda"},"cwd":"%s"}' "$BPROJ")"
+# Redirect inside a subshell: the closing paren must not glue onto the path
+# (`/dev/null)`), which previously defeated the ALWAYS_OK_WRITE match and
+# prompted on a plain `2>/dev/null`.
+run_bash "scope: subshell 2>/dev/null no prompt" 0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"(grep -r foo . 2>/dev/null)"},"cwd":"%s"}' "$BPROJ")"
+# A `>` inside a quoted awk/sed program is data, not a redirect — no target.
+run_bash "scope: awk > in program no prompt" 0 \
+    "$(printf '{"tool_name":"Bash","tool_input":{"command":"awk %s{if($1>5)print}%s data.txt"},"cwd":"%s"}' "'" "'" "$BPROJ")"
 rmdir "$BPROJ"
 
 echo

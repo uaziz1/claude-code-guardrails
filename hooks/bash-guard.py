@@ -57,6 +57,67 @@ SENSITIVE_EXEMPT_ROOTS = [
 ]
 
 
+def _strip_heredocs(cmd):
+    """Remove heredoc bodies, leaving the redirect intro intact.
+
+    `cat > f <<'EOF' ... EOF` becomes `cat > f << EOF`. A heredoc body is
+    DATA the command writes, not commands it runs — scanning it for
+    command-substitution / sensitive-path tokens produces false positives
+    (e.g. a `` `code` `` span or the literal `.env` inside a markdown PR
+    description). Matches `<<WORD` / `<<'WORD'` / `<<-WORD`, non-greedily up
+    to a line whose sole content is the delimiter. Unterminated heredocs
+    don't match, so the body is left in place (fail toward scanning).
+    """
+    return re.sub(
+        r"(?P<op><<-?)\s*['\"]?(?P<tag>\w+)['\"]?.*?\n[ \t]*(?P=tag)\b",
+        lambda m: m.group("op") + " " + m.group("tag"),
+        cmd,
+        flags=re.DOTALL,
+    )
+
+
+def _blank_quotes(s):
+    """Replace the CONTENTS of single/double-quoted spans with spaces, keeping
+    the quote characters and overall length. Quoted text is data, not command
+    structure: a `>` inside an awk program, a backtick inside a single-quoted
+    string (literal in shell, never substitution), or `.env` inside a grep
+    pattern must not read as executable structure. Single quotes take no
+    escapes in shell; double quotes honor backslash escapes.
+    """
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in ("'", '"'):
+            j = i + 1
+            while j < n and s[j] != c:
+                if c == '"' and s[j] == "\\" and j + 1 < n:
+                    j += 2
+                    continue
+                j += 1
+            out.append(c)
+            out.append(" " * (j - i - 1))
+            if j < n:
+                out.append(c)
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _blank_noncode(cmd):
+    """Command with heredoc bodies dropped and quoted-string contents blanked.
+
+    Used ONLY for scans that key on command STRUCTURE — command-substitution
+    at command position, sensitive-path references, and write-redirect target
+    extraction — so that data can't masquerade as structure. The destructive-
+    command scans (rm -rf, dd, sudo, curl|sh, …) keep seeing the raw command,
+    preserving the guard's substring threat model for those.
+    """
+    return _blank_quotes(_strip_heredocs(cmd))
+
+
 def _strip_exempt_paths(cmd):
     """Replace exempt-root path tokens with a placeholder for the
     SENSITIVE_PATH scan. The match stops at shell metacharacters so chained
@@ -93,6 +154,13 @@ SENSITIVE_PATH = (
 )
 
 
+# Command-substitution-in-command-position patterns. Named so main() can
+# route them through the noncode-blanked haystack (data in heredocs/quotes
+# must not read as executable structure).
+CMDSUB_DOLLAR = r"(?:^|[;&|]\s*)\$\("
+CMDSUB_BACKTICK = r"(?:^|[;&|]\s*)`"
+
+
 # Each entry is (pattern, label, tier). Tier "catastrophic" enforces in
 # both modes; "strict" is dropped in build mode. Build mode keeps anything
 # that destroys data irrecoverably, escalates privilege, exfils secrets,
@@ -109,6 +177,14 @@ PATTERNS = [
         "rm --recursive --force", "catastrophic"),
     (r"\brm\s+(?:[^|;&]*?\s)?--force\b[^|;&]*?--recursive\b",
         "rm --force --recursive", "catastrophic"),
+
+    # recursive + force as SEPARATE flags, either order (short or long):
+    # `rm -f -r x`, `rm -r --force x`. Same blast radius as -rf; the
+    # combined-token patterns above miss the separated form.
+    (r"\brm\s+[^|;&]*?(?:--recursive\b|-[A-Za-z]*[rR]\b)[^|;&]*?(?:--force\b|-[A-Za-z]*[fF]\b)",
+        "rm recursive+force (separated flags)", "catastrophic"),
+    (r"\brm\s+[^|;&]*?(?:--force\b|-[A-Za-z]*[fF]\b)[^|;&]*?(?:--recursive\b|-[A-Za-z]*[rR]\b)",
+        "rm force+recursive (separated flags)", "catastrophic"),
 
     # git destructive operations
     (r"\bgit\s+push\s+[^|;&]*?(?:--force(?!-with-lease)|-f\b)",
@@ -192,9 +268,11 @@ PATTERNS = [
     (r"\bfind\s+[^|;&]*?-(?:exec|execdir|delete)\b",
         "find -exec / -execdir / -delete", "strict"),
 
-    # Command substitution in command position (rare in legit usage)
-    (r"(?:^|[;&|]\s*)\$\(",                        "$( ... ) as command", "strict"),
-    (r"(?:^|[;&|]\s*)`",                           "backtick substitution as command", "strict"),
+    # Command substitution in command position (rare in legit usage).
+    # Scanned against the noncode-blanked command (see main) so a `$(`/backtick
+    # inside a heredoc body or quoted string — data, not a command — is exempt.
+    (CMDSUB_DOLLAR,                                "$( ... ) as command", "strict"),
+    (CMDSUB_BACKTICK,                              "backtick substitution as command", "strict"),
 
     # Sensitive-path access. Catches reads (cat/head/less/sed/grep/xxd/base64/
     # tee), copies/renames (cp/mv/ln) and exfil (scp/rsync) of credentials,
@@ -241,16 +319,21 @@ def find_write_targets(cmd):
     covered by SENSITIVE_PATH and PATH_DENY for the dangerous cases.
     """
     targets = []
+    # Path token: excludes whitespace, quotes, and shell metacharacters —
+    # including ()[]{} so a redirect inside a subshell (`... 2>/dev/null)`)
+    # or brace/param construct doesn't drag the closing bracket into the
+    # captured path and defeat the ALWAYS_OK_WRITE / allow-root match.
+    _PATH_TOK = r"[^\s\"';|&<>`$(){}\[\]]+"
     # Redirects: optional fd prefix, > or >>, optional quote, then path.
     # Excludes command-substitution constructs ($(...), `...`).
     for m in re.finditer(
-        r"[12&]?>{1,2}\s*([\"']?)([^\s\"';|&<>`$]+)\1",
+        r"[12&]?>{1,2}\s*([\"']?)(" + _PATH_TOK + r")\1",
         cmd,
     ):
         targets.append(m.group(2))
     # tee with optional flags
     for m in re.finditer(
-        r"\btee\b(?:\s+-\S+)*\s+([\"']?)([^\s\"';|&<>`$]+)\1",
+        r"\btee\b(?:\s+-\S+)*\s+([\"']?)(" + _PATH_TOK + r")\1",
         cmd,
     ):
         targets.append(m.group(2))
@@ -281,16 +364,25 @@ def main():
             and "168.119.2.111" in cmd):
         sys.exit(0)
 
-    # SENSITIVE_PATH gets exempt-root paths stripped so legitimate access
-    # to e.g. ~/.cyrus/credentials doesn't false-positive. All other
-    # patterns (rm -rf, pipe-to-shell, etc.) still see the original cmd.
-    sens_cmd = _strip_exempt_paths(cmd)
+    # Structural scans (command-substitution position, sensitive-path
+    # reference) run against a noncode-blanked command so heredoc bodies and
+    # quoted data can't masquerade as command structure. SENSITIVE_PATH also
+    # gets exempt-root paths stripped so legitimate access to e.g.
+    # ~/.cyrus/credentials doesn't false-positive. Destructive patterns
+    # (rm -rf, pipe-to-shell, etc.) still see the original cmd.
+    struct_cmd = _blank_noncode(cmd)
+    sens_cmd = _blank_noncode(_strip_exempt_paths(cmd))
 
     # Hard-block patterns first (deny via exit 2).
     for pat, label, tier in PATTERNS:
         if mode == "build" and tier != "catastrophic":
             continue
-        haystack = sens_cmd if pat is SENSITIVE_PATH else cmd
+        if pat is SENSITIVE_PATH:
+            haystack = sens_cmd
+        elif pat in (CMDSUB_DOLLAR, CMDSUB_BACKTICK):
+            haystack = struct_cmd
+        else:
+            haystack = cmd
         if re.search(pat, haystack):
             print(f"bash-guard blocked: {label}", file=sys.stderr)
             print(f"  command: {cmd}", file=sys.stderr)
@@ -303,7 +395,7 @@ def main():
     # Skipped in build mode — when iterating, redirecting to /var/log/foo
     # or wherever shouldn't prompt.
     if cwd and mode != "build":
-        for tgt in find_write_targets(cmd):
+        for tgt in find_write_targets(struct_cmd):
             tgt_abs = tgt if os.path.isabs(tgt) else os.path.join(cwd, tgt)
             if tgt in ALWAYS_OK_WRITE or tgt_abs in ALWAYS_OK_WRITE:
                 continue
